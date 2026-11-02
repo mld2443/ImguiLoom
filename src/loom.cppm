@@ -1,10 +1,16 @@
 module;
 
-#include <algorithm>
-#include <cmath>
-#include <concepts>
-#include <limits>
-#include <utility>
+#include <algorithm> // clamp, contains
+#include <cmath>     // fmod, pow
+#include <concepts>  // derived_from, invocable
+#include <cstddef>   // size_t
+#include <format>    // format, format_to
+#include <limits>    // numeric_limits
+#include <memory>    // make_unique, unique_ptr
+#include <string>    // string
+#include <utility>   // forward, move
+#include <variant>   // get_if, holds_alternative, monostate, variant
+#include <vector>    // erase, vector
 
 #ifndef IMGUI_DEFINE_MATH_OPERATORS
 #define IMGUI_DEFINE_MATH_OPERATORS
@@ -13,6 +19,7 @@ module;
 #include <imgui_internal.h>
 
 export module loom;
+export import :node;
 
 export namespace loom {
     class Canvas {
@@ -24,7 +31,12 @@ export namespace loom {
         Canvas& operator=(Canvas&&) = delete;
         ~Canvas();
 
+        template<std::derived_from<Node> T>
+        T& add(ImVec2 position, auto&&... args);
+        void draw();
         void draw(std::invocable auto&& content);
+
+        NodeStyle style;
 
     private:
         class ContextScope {
@@ -37,6 +49,28 @@ export namespace loom {
             ImGuiContext* m_previous;
         };
 
+        class NodeFrame {
+        public:
+            NodeFrame(const Node& node, const NodeStyle& style, ImVec2 origin);
+            NodeFrame(const NodeFrame&) = delete;
+            NodeFrame& operator=(const NodeFrame&) = delete;
+            ~NodeFrame();
+            explicit operator bool() const;
+        };
+
+        struct NodeDrag {
+            Node*  pressed;
+            ImVec2 origin;
+            ImVec2 applied;
+            bool   toggle;
+        };
+
+        struct BoxSelection {
+            ImVec2             origin;
+            std::vector<Node*> initial;
+            bool               toggle;
+        };
+
         class Frame {
         public:
             explicit Frame(Canvas& canvas);
@@ -44,10 +78,16 @@ export namespace loom {
             Frame& operator=(const Frame&) = delete;
             ~Frame();
             explicit operator bool() const;
+            void drawNodes();
         private:
             void forwardInput();
+            void advanceGesture();
+            void select();
+            void drawSelection() const;
             void navigate();
+            void positionNodes();
             void positionPopups();
+            void moveWindow(ImGuiWindow* window, ImVec2 position);
             void forwardRequests();
             void drawGrid() const;
             void append(const ImDrawList& source) const;
@@ -63,12 +103,17 @@ export namespace loom {
             bool         m_focused = false;
         };
 
+        static ImGuiWindow* nodeWindow(const Node& node);
+        static auto resolve(const NodeStyle& node, const NodeStyle& canvas, auto member, auto fallback) -> decltype(fallback);
         static ImGuiContext* createContext(ImGuiContext* host);
 
         ImGuiContext* const m_host;
         ImGuiContext* const m_context; // Owned: ImGui creates and destroys its heap-allocated context.
         ImVec2              m_pan = {0, 0};
         float               m_scale = 1;
+        std::vector<std::unique_ptr<Node>> m_nodes;
+        std::vector<Node*>                m_selection;
+        std::variant<std::monostate, NodeDrag, BoxSelection> m_gesture;
     };
 }
 
@@ -79,17 +124,65 @@ export namespace loom {
 
 namespace loom {
     Canvas::Canvas() : m_host(ImGui::GetCurrentContext()), m_context(createContext(m_host)) {}
-    Canvas::~Canvas() { ImGui::DestroyContext(m_context); }
+    Canvas::~Canvas() {
+        m_nodes.clear();
+        ImGui::DestroyContext(m_context);
+    }
+
+    template<std::derived_from<Node> T>
+    T& Canvas::add(ImVec2 position, auto&&... args) {
+        auto node = std::make_unique<T>(std::forward<decltype(args)>(args)...);
+        node->position = position;
+        T& result = *node;
+        m_nodes.push_back(std::move(node));
+        return result;
+    }
+
+    void Canvas::draw() { draw([] {}); }
 
     void Canvas::draw(std::invocable auto&& content) {
         IM_ASSERT(ImGui::GetCurrentContext() == m_host);
-        if (Frame frame(*this); frame) std::forward<decltype(content)>(content)();
+        if (Frame frame(*this); frame) {
+            std::forward<decltype(content)>(content)();
+            frame.drawNodes();
+        }
     }
 
     Canvas::ContextScope::ContextScope(ImGuiContext* context) : m_previous(ImGui::GetCurrentContext()) {
         ImGui::SetCurrentContext(context);
     }
     Canvas::ContextScope::~ContextScope() { ImGui::SetCurrentContext(m_previous); }
+
+    Canvas::NodeFrame::NodeFrame(const Node& node, const NodeStyle& style, ImVec2 origin) {
+        const std::string name = std::format("{}###loom-{}", node.title, static_cast<const void*>(&node));
+        const ImGuiStyle& theme = ImGui::GetStyle();
+        const ImVec4 header = resolve(node.style, style, &NodeStyle::header, theme.Colors[ImGuiCol_TitleBg]);
+        ImGui::PushStyleColor(ImGuiCol_TitleBg, header);
+        ImGui::PushStyleColor(ImGuiCol_TitleBgActive, header);
+        ImGui::PushStyleColor(ImGuiCol_Text, resolve(node.style, style, &NodeStyle::headerText, theme.Colors[ImGuiCol_Text]));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, resolve(node.style, style, &NodeStyle::body, theme.Colors[ImGuiCol_WindowBg]));
+        ImGui::PushStyleColor(ImGuiCol_Border, resolve(node.style, style, &NodeStyle::border, theme.Colors[ImGuiCol_Border]));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, resolve(node.style, style, &NodeStyle::padding, theme.WindowPadding));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, resolve(node.style, style, &NodeStyle::rounding, theme.WindowRounding));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, resolve(node.style, style, &NodeStyle::borderWidth, theme.WindowBorderSize));
+        ImGui::SetNextWindowPos(origin + node.position);
+        // Native auto-fit clamps to the viewport. A node's logical dimensions must
+        // instead follow its content, even when zoom makes it larger than the view.
+        ImGui::SetNextWindowSizeConstraints({0, 0}, {FLT_MAX, FLT_MAX}, [](ImGuiSizeCallbackData* data) {
+            const ImGuiWindow* window = ImGui::GetCurrentWindow();
+            data->DesiredSize = window->ContentSize + window->WindowPadding * 2 + ImVec2(0, window->TitleBarHeight);
+            data->DesiredSize.x = ImMax(data->DesiredSize.x, ImGui::CalcTextSize(window->Name, nullptr, true).x + window->WindowPadding.x * 2);
+        });
+        ImGui::Begin(name.c_str(), nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse
+            | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse
+            | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize);
+        // Begin locks the frame's appearance; body widgets use the ordinary theme.
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor(5);
+    }
+
+    Canvas::NodeFrame::~NodeFrame() { ImGui::End(); }
+    Canvas::NodeFrame::operator bool() const { return !ImGui::GetCurrentWindow()->SkipItems; }
 
     Canvas::Frame::Frame(Canvas& canvas) : m_canvas(canvas), m_pan(canvas.m_pan), m_scale(canvas.m_scale) {
         ImGui::PushID(&canvas);
@@ -108,6 +201,7 @@ namespace loom {
 
         ImGui::SetCurrentContext(canvas.m_context);
         if (!visible || m_extent.x <= 0 || m_extent.y <= 0) {
+            canvas.m_gesture = std::monostate{};
             canvas.m_context->InputEventsQueue.clear();
             canvas.m_context->IO.ClearInputKeys();
             canvas.m_context->IO.ClearInputMouse();
@@ -125,7 +219,9 @@ namespace loom {
         io.DisplayFramebufferScale = canvas.m_host->IO.DisplayFramebufferScale * m_scale;
         io.BackendFlags = canvas.m_host->IO.BackendFlags & (ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures);
         io.ConfigFlags = canvas.m_host->IO.ConfigFlags & ImGuiConfigFlags_NavEnableKeyboard;
+        io.MouseDragThreshold = canvas.m_host->IO.MouseDragThreshold / m_scale;
         ImGui::GetStyle() = canvas.m_host->Style;
+        positionNodes();
         ImGui::NewFrame();
         if (!m_focused) {
             ImGui::ClearActiveID();
@@ -141,6 +237,7 @@ namespace loom {
             | ImGuiWindowFlags_NoBringToFrontOnFocus);
         m_root = ImGui::GetCurrentWindow();
         ImGui::KeepAliveID(m_root->GetID("##pan"));
+        ImGui::KeepAliveID(m_root->GetID("##selection"));
     }
 
     Canvas::Frame::~Frame() {
@@ -148,6 +245,7 @@ namespace loom {
             navigate();
             forwardRequests();
             ImGui::End();
+            positionNodes();
             positionPopups();
             // ImGui 1.93's modal backdrop requires exactly two triangles, including
             // at fractional density. Widget geometry is already built; Begin resets these flags next frame.
@@ -164,6 +262,19 @@ namespace loom {
     }
 
     Canvas::Frame::operator bool() const { return m_root != nullptr; }
+
+    void Canvas::Frame::drawNodes() {
+        advanceGesture();
+        // Capture the count so creation from a node callback takes effect next frame.
+        // Moving the owning pointers never moves the node objects themselves.
+        const auto count = m_canvas.m_nodes.size();
+        for (std::size_t i = 0; i < count; ++i) {
+            Node& node = *m_canvas.m_nodes[i];
+            if (NodeFrame frame(node, m_canvas.style, m_root->Pos); frame) node.draw();
+        }
+        select();
+        drawSelection();
+    }
 
     void Canvas::Frame::forwardInput() {
         ImGuiIO& io = ImGui::GetIO();
@@ -205,6 +316,100 @@ namespace loom {
         else io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
     }
 
+    void Canvas::Frame::advanceGesture() {
+        ImGuiContext& context = *m_canvas.m_context;
+        ImGuiIO& io = context.IO;
+        const ImGuiID selection = m_root->GetID("##selection");
+        if (!m_focused || context.ActiveId != selection) {
+            m_canvas.m_gesture = std::monostate{};
+            return;
+        }
+        const bool dragging = ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left);
+        if (auto* drag = std::get_if<NodeDrag>(&m_canvas.m_gesture)) {
+            if (dragging && std::ranges::contains(m_canvas.m_selection, drag->pressed)) {
+                const ImVec2 distance = io.MousePos - drag->origin;
+                for (Node* node : m_canvas.m_selection) node->position += distance - drag->applied;
+                drag->applied = distance;
+                positionNodes();
+            }
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && !dragging && !drag->toggle)
+                m_canvas.m_selection = {drag->pressed};
+        } else if (auto* box = std::get_if<BoxSelection>(&m_canvas.m_gesture); box && dragging) {
+            const ImVec2 mouse = io.MousePos - m_root->Pos;
+            const ImRect bounds(ImMin(box->origin, mouse), ImMax(box->origin, mouse));
+            m_canvas.m_selection = box->initial;
+            for (const auto& node : m_canvas.m_nodes) {
+                const ImGuiWindow* window = nodeWindow(*node);
+                if (!window) continue;
+                if (!bounds.Overlaps(ImRect(node->position, node->position + window->Size))) continue;
+                if (box->toggle && std::ranges::contains(box->initial, node.get())) std::erase(m_canvas.m_selection, node.get());
+                else m_canvas.m_selection.push_back(node.get());
+            }
+        }
+        if (!io.MouseDown[ImGuiMouseButton_Left]) {
+            m_canvas.m_gesture = std::monostate{};
+            ImGui::ClearActiveID();
+        }
+    }
+
+    void Canvas::Frame::select() {
+        ImGuiContext& context = *m_canvas.m_context;
+        const ImGuiIO& io = context.IO;
+        if (!m_hovered || !ImGui::IsMouseClicked(ImGuiMouseButton_Left)) return;
+        if (!std::holds_alternative<std::monostate>(m_canvas.m_gesture)) return;
+        for (const auto& node : m_canvas.m_nodes) {
+            ImGuiWindow* window = nodeWindow(*node);
+            if (!window || !context.HoveredWindow || context.HoveredWindow->RootWindow != window) continue;
+            const bool selected = std::ranges::contains(m_canvas.m_selection, node.get());
+            const bool popup = !context.OpenPopupStack.empty();
+            const bool widget = popup || (context.HoveredId != 0 && context.HoveredId != window->MoveId)
+                || (context.ActiveId != 0 && context.ActiveId != window->MoveId);
+            // A widget may just have opened a popup. Select its node without taking
+            // keyboard focus back from the popup or starting a canvas gesture.
+            if (!popup) ImGui::FocusWindow(window);
+            if (widget) {
+                if (!selected) m_canvas.m_selection = {node.get()};
+                return;
+            }
+            if (io.KeyCtrl) {
+                if (selected) std::erase(m_canvas.m_selection, node.get());
+                else m_canvas.m_selection.push_back(node.get());
+            } else if (!selected) m_canvas.m_selection = {node.get()};
+            m_canvas.m_gesture = NodeDrag{.pressed = node.get(), .origin = io.MousePos, .applied = {0, 0}, .toggle = io.KeyCtrl};
+            ImGui::SetActiveID(m_root->GetID("##selection"), m_root);
+            context.ActiveIdMouseButton = ImGuiMouseButton_Left;
+            return;
+        }
+        if (context.OpenPopupStack.empty() && (context.HoveredWindow == m_root || context.HoveredWindow == nullptr) && context.HoveredId == 0
+            && (context.ActiveId == 0 || context.ActiveId == m_root->MoveId)) {
+            if (!io.KeyCtrl) m_canvas.m_selection.clear();
+            m_canvas.m_gesture = BoxSelection{.origin = io.MousePos - m_root->Pos, .initial = m_canvas.m_selection, .toggle = io.KeyCtrl};
+            ImGui::FocusWindow(m_root);
+            ImGui::SetActiveID(m_root->GetID("##selection"), m_root);
+            context.ActiveIdMouseButton = ImGuiMouseButton_Left;
+        }
+    }
+
+    void Canvas::Frame::drawSelection() const {
+        const ImGuiStyle& theme = ImGui::GetStyle();
+        for (const Node* node : m_canvas.m_selection) {
+            ImGuiWindow* window = nodeWindow(*node);
+            if (!window || window->Hidden) continue;
+            const ImVec4 color = resolve(node->style, m_canvas.style, &NodeStyle::selectionBorder, theme.Colors[ImGuiCol_NavCursor]);
+            const float width = resolve(node->style, m_canvas.style, &NodeStyle::selectionBorderWidth, 2.0f);
+            window->DrawList->PushClipRectFullScreen();
+            window->DrawList->AddRect(window->Pos, window->Pos + window->Size, ImGui::GetColorU32(color), window->WindowRounding, width);
+            window->DrawList->PopClipRect();
+        }
+        if (const auto* box = std::get_if<BoxSelection>(&m_canvas.m_gesture); box && ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left)) {
+            const ImVec2 start = m_root->Pos + box->origin;
+            const ImVec2 end = ImGui::GetIO().MousePos;
+            ImDrawList* list = ImGui::GetForegroundDrawList();
+            list->AddRectFilled(ImMin(start, end), ImMax(start, end), ImGui::GetColorU32(ImGuiCol_Header, 0.25f));
+            list->AddRect(ImMin(start, end), ImMax(start, end), ImGui::GetColorU32(ImGuiCol_NavCursor));
+        }
+    }
+
     void Canvas::Frame::navigate() {
         ImGuiContext& context = *m_canvas.m_context;
         ImGuiIO& io = context.IO;
@@ -226,6 +431,13 @@ namespace loom {
         }
     }
 
+    void Canvas::Frame::positionNodes() {
+        const ImVec2 origin = ImTrunc(m_canvas.m_pan / m_canvas.m_scale);
+        for (const auto& node : m_canvas.m_nodes)
+            if (ImGuiWindow* window = nodeWindow(*node))
+                moveWindow(window, ImTrunc(origin + node->position));
+    }
+
     void Canvas::Frame::positionPopups() {
         // The content window follows the view on its next Begin(). Popup windows
         // retain positions, so move them and their anchors by the same rounded delta.
@@ -241,6 +453,23 @@ namespace loom {
         for (ImGuiPopupData& popup : m_canvas.m_context->OpenPopupStack) {
             popup.OpenPopupPos += delta;
             popup.OpenMousePos += delta;
+        }
+    }
+
+    void Canvas::Frame::moveWindow(ImGuiWindow* window, ImVec2 position) {
+        const ImVec2 delta = position - window->Pos;
+        if (delta.x == 0 && delta.y == 0) return;
+        for (ImGuiWindow* child : m_canvas.m_context->Windows) {
+            if (child->RootWindow != window) continue;
+            ImGui::SetWindowPos(child, child->Pos + delta);
+            child->InnerRect.Translate(delta);
+        }
+        // NewFrame hit testing precedes Begin, including for newly exposed children.
+        for (ImGuiWindow* child : m_canvas.m_context->Windows) {
+            if (child->RootWindow != window) continue;
+            child->OuterRectClipped = child->Rect();
+            child->OuterRectClipped.ClipWith(ImRect({0, 0}, ImGui::GetIO().DisplaySize));
+            if (child->Flags & ImGuiWindowFlags_ChildWindow) child->OuterRectClipped.ClipWith(child->ParentWindow->InnerRect);
         }
     }
 
@@ -313,6 +542,17 @@ namespace loom {
         if (offsets) target._CmdHeader.VtxOffset = static_cast<unsigned int>(target.VtxBuffer.Size);
         target._VtxCurrentIdx = offsets ? 0 : static_cast<unsigned int>(target.VtxBuffer.Size);
         target.AddDrawCmd();
+    }
+
+    ImGuiWindow* Canvas::nodeWindow(const Node& node) {
+        // Lookup needs only the stable suffix, without allocating or copying the title.
+        char name[16 + sizeof(void*) * 2];
+        const auto end = std::format_to(name, "###loom-{}", static_cast<const void*>(&node));
+        return ImGui::FindWindowByID(ImHashStr(name, static_cast<std::size_t>(end - name)));
+    }
+
+    auto Canvas::resolve(const NodeStyle& node, const NodeStyle& canvas, auto member, auto fallback) -> decltype(fallback) {
+        return (node.*member).value_or((canvas.*member).value_or(fallback));
     }
 
     ImGuiContext* Canvas::createContext(ImGuiContext* host) {
