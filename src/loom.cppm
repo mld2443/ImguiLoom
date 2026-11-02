@@ -1,16 +1,21 @@
 module;
 
-#include <algorithm> // clamp, contains
-#include <cmath>     // fmod, pow
-#include <concepts>  // derived_from
-#include <cstddef>   // size_t
-#include <format>    // format, format_to
-#include <limits>    // numeric_limits
-#include <memory>    // make_unique, unique_ptr
-#include <string>    // string
-#include <utility>   // forward, move
-#include <variant>   // get_if, holds_alternative, monostate, variant
-#include <vector>    // erase, vector
+#include <algorithm>   // any_of, clamp, contains, find_if
+#include <cmath>       // fmod, pow
+#include <concepts>    // derived_from, same_as
+#include <cstddef>     // ptrdiff_t, size_t
+#include <cstdint>     // uint64_t
+#include <format>      // format, format_to
+#include <functional>  // function
+#include <limits>      // numeric_limits
+#include <memory>      // make_unique, unique_ptr
+#include <optional>    // optional
+#include <stack>       // stack
+#include <string>      // string
+#include <type_traits> // remove_cvref_t
+#include <utility>     // forward, move, swap
+#include <variant>     // get, get_if, holds_alternative, monostate, variant, visit
+#include <vector>      // erase, erase_if, vector
 
 #ifndef IMGUI_DEFINE_MATH_OPERATORS
 #define IMGUI_DEFINE_MATH_OPERATORS
@@ -35,9 +40,45 @@ export namespace loom {
         T& add(ImVec2 position, auto&&... args);
         void draw();
 
+        // Call these between draw() calls. remove() requires a live node in this
+        // canvas and clears history before destruction. add() is unrecorded.
+        void remove(Node& node);
+        void undo();
+        void redo();
+        void clearHistory();
+
+        // Runs inside the Add submenu, with its opening point in canvas units.
+        // Nodes added here form one undoable UI action. Balance your own ImGui
+        // operations; captured application data must outlive this callable's use.
+        std::function<void(Canvas&, ImVec2)> addMenu;
         NodeStyle style;
 
     private:
+        // Ownership and inverse edits.
+        struct NodeEntry {
+            std::unique_ptr<Node> node;
+            std::uint64_t serial;
+        };
+
+        // A transfer borrows a live node or exclusively owns its detached entry.
+        struct NodeTransfer {
+            std::size_t index;
+            std::variant<Node*, NodeEntry> node;
+        };
+        struct Nodes {
+            std::vector<NodeTransfer> nodes;
+            std::vector<Node*> beforeSelection;
+            std::vector<Node*> afterSelection;
+        };
+        struct Placement { Node* node; ImVec2 position; };
+        struct Move { std::vector<Placement> positions; };
+        struct Rename { Node* node; std::string title; };
+        struct Appearance { Node* node; NodeStyle style; };
+        struct Restyle { std::vector<Appearance> appearances; };
+        using Action = std::variant<Nodes, Move, Rename, Restyle>;
+        using History = std::stack<Action, std::vector<Action>>;
+
+        // ImGui scopes.
         class ContextScope {
         public:
             explicit ContextScope(ImGuiContext* context);
@@ -50,24 +91,33 @@ export namespace loom {
 
         class NodeFrame {
         public:
-            NodeFrame(const Node& node, const NodeStyle& style, ImVec2 origin);
+            NodeFrame(const NodeEntry& entry, const NodeStyle& style, ImVec2 origin);
             NodeFrame(const NodeFrame&) = delete;
             NodeFrame& operator=(const NodeFrame&) = delete;
             ~NodeFrame();
             explicit operator bool() const;
         };
 
-        struct NodeDrag {
-            Node*  pressed;
-            ImVec2 origin;
-            ImVec2 applied;
-            bool   toggle;
+        class PopupScope {
+        public:
+            explicit PopupScope(const char* name);
+            PopupScope(const PopupScope&) = delete;
+            PopupScope& operator=(const PopupScope&) = delete;
+            ~PopupScope();
+            explicit operator bool() const;
+        private:
+            bool m_open;
         };
 
-        struct BoxSelection {
-            ImVec2             origin;
-            std::vector<Node*> initial;
-            bool               toggle;
+        class MenuScope {
+        public:
+            explicit MenuScope(const char* name);
+            MenuScope(const MenuScope&) = delete;
+            MenuScope& operator=(const MenuScope&) = delete;
+            ~MenuScope();
+            explicit operator bool() const;
+        private:
+            bool m_open;
         };
 
         class Frame {
@@ -97,17 +147,57 @@ export namespace loom {
             ImGuiContext* const m_context;
         };
 
+        // Interaction. References here never own nodes.
+        struct NodeDrag {
+            Node*  pressed;
+            ImVec2 origin;
+            ImVec2 applied;
+            bool   toggle;
+            std::vector<Placement> initial;
+        };
+
+        struct BoxSelection {
+            ImVec2             origin;
+            std::vector<Node*> initial;
+            bool               toggle;
+        };
+
+        struct ContextMenu {
+            Node*             node;
+            ImVec2            position;
+            std::vector<char> title;
+        };
+
         void drawNodes(const Frame& frame);
         void advanceGesture(const Frame& frame);
+        void finishGesture();
+        Node* hoveredNode() const;
         void select(const Frame& frame);
         void drawSelection(const Frame& frame) const;
+        void drawContextMenu(const Frame& frame);
+        void drawCanvasMenu();
+        void drawNodeMenu(Node& node);
+        void drawStyleMenu(Node& node);
+        void styleProperty(Node& node, const char* label, auto member, auto fallback);
+        void beginStyleEdit();
+        void finishStyleEdit();
+        void shortcuts(const Frame& frame);
+        void recordCreation(std::size_t first);
+        void deleteSelection();
+        void record(Action action);
+        void replay(History& source, History& destination, bool undo);
+        void transfer(Nodes& nodes);
+        void detach(const NodeEntry& entry);
+        const NodeEntry& entry(const Node& node) const;
         void navigate(const Frame& frame);
         void positionNodes();
         void positionPopups(const Frame& frame);
         void moveWindow(ImGuiWindow* window, ImVec2 position);
         void drawGrid(const Frame& frame) const;
 
-        static ImGuiWindow* nodeWindow(const Node& node);
+        static ImGuiWindow* nodeWindow(const NodeEntry& entry);
+        static bool sameStyle(const NodeStyle& a, const NodeStyle& b);
+        static bool inputTitle(std::vector<char>& title);
         static auto resolve(const NodeStyle& node, const NodeStyle& canvas, auto member, auto fallback) -> decltype(fallback);
         static ImGuiContext* createContext(ImGuiContext* host);
 
@@ -115,9 +205,14 @@ export namespace loom {
         ImGuiContext* const m_context; // Owned: ImGui creates and destroys its heap-allocated context.
         ImVec2              m_pan = {0, 0};
         float               m_scale = 1;
-        std::vector<std::unique_ptr<Node>> m_nodes;
+        std::uint64_t       m_nextSerial = 1;
+        std::vector<NodeEntry>             m_nodes;
         std::vector<Node*>                 m_selection;
         std::variant<std::monostate, NodeDrag, BoxSelection> m_gesture;
+        std::optional<ContextMenu> m_menu;
+        std::optional<Restyle>     m_styleEdit;
+        History m_undo;
+        History m_redo;
     };
 }
 
@@ -129,6 +224,8 @@ export namespace loom {
 namespace loom {
     Canvas::Canvas() : m_host(ImGui::GetCurrentContext()), m_context(createContext(m_host)) {}
     Canvas::~Canvas() {
+        m_redo = {};
+        m_undo = {};
         m_nodes.clear();
         ImGui::DestroyContext(m_context);
     }
@@ -138,7 +235,7 @@ namespace loom {
         auto node = std::make_unique<T>(std::forward<decltype(args)>(args)...);
         node->position = position;
         T& result = *node;
-        m_nodes.push_back(std::move(node));
+        m_nodes.push_back({.node = std::move(node), .serial = m_nextSerial++});
         return result;
     }
 
@@ -148,7 +245,9 @@ namespace loom {
         positionNodes();
         Frame frame(m_context, m_pan, m_scale);
         if (!frame) {
-            m_gesture = std::monostate{};
+            finishGesture();
+            finishStyleEdit();
+            m_menu.reset();
             return;
         }
         ImGui::KeepAliveID(frame.root->GetID("##pan"));
@@ -156,6 +255,8 @@ namespace loom {
         advanceGesture(frame);
         drawNodes(frame);
         select(frame);
+        drawContextMenu(frame);
+        shortcuts(frame);
         drawSelection(frame);
         navigate(frame);
         positionNodes();
@@ -164,13 +265,44 @@ namespace loom {
         frame.render(m_pan, m_scale);
     }
 
+    void Canvas::remove(Node& node) {
+        IM_ASSERT(!m_context->WithinFrameScope);
+        const ContextScope context(m_context);
+        const NodeEntry& item = entry(node);
+        clearHistory();
+        detach(item);
+        std::erase_if(m_nodes, [&](const NodeEntry& candidate) { return candidate.node.get() == &node; });
+    }
+
+    void Canvas::undo() {
+        IM_ASSERT(!m_context->WithinFrameScope);
+        const ContextScope context(m_context);
+        replay(m_undo, m_redo, true);
+    }
+
+    void Canvas::redo() {
+        IM_ASSERT(!m_context->WithinFrameScope);
+        const ContextScope context(m_context);
+        replay(m_redo, m_undo, false);
+    }
+
+    void Canvas::clearHistory() {
+        IM_ASSERT(!m_context->WithinFrameScope);
+        const ContextScope context(m_context);
+        finishGesture();
+        finishStyleEdit();
+        m_redo = {};
+        m_undo = {};
+    }
+
     Canvas::ContextScope::ContextScope(ImGuiContext* context) : m_previous(ImGui::GetCurrentContext()) {
         ImGui::SetCurrentContext(context);
     }
     Canvas::ContextScope::~ContextScope() { ImGui::SetCurrentContext(m_previous); }
 
-    Canvas::NodeFrame::NodeFrame(const Node& node, const NodeStyle& style, ImVec2 origin) {
-        const std::string name = std::format("{}###loom-{}", node.title, static_cast<const void*>(&node));
+    Canvas::NodeFrame::NodeFrame(const NodeEntry& entry, const NodeStyle& style, ImVec2 origin) {
+        const Node& node = *entry.node;
+        const std::string name = std::format("{}###loom-{}", node.title, entry.serial);
         const ImGuiStyle& theme = ImGui::GetStyle();
         const ImVec4 header = resolve(node.style, style, &NodeStyle::header, theme.Colors[ImGuiCol_TitleBg]);
         ImGui::PushStyleColor(ImGuiCol_TitleBg, header);
@@ -184,11 +316,13 @@ namespace loom {
         ImGui::SetNextWindowPos(origin + node.position);
         // Native auto-fit clamps to the viewport. A node's logical dimensions must
         // instead follow its content, even when zoom makes it larger than the view.
+        // ImGui's cached window name can retain an older title after a rename.
+        float titleWidth = ImGui::CalcTextSize(node.title.c_str(), nullptr, true).x;
         ImGui::SetNextWindowSizeConstraints({0, 0}, {FLT_MAX, FLT_MAX}, [](ImGuiSizeCallbackData* data) {
             const ImGuiWindow* window = ImGui::GetCurrentWindow();
             data->DesiredSize = window->ContentSize + window->WindowPadding * 2 + ImVec2(0, window->TitleBarHeight);
-            data->DesiredSize.x = ImMax(data->DesiredSize.x, ImGui::CalcTextSize(window->Name, nullptr, true).x + window->WindowPadding.x * 2);
-        });
+            data->DesiredSize.x = ImMax(data->DesiredSize.x, *static_cast<const float*>(data->UserData) + window->WindowPadding.x * 2);
+        }, &titleWidth);
         ImGui::Begin(name.c_str(), nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse
             | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse
             | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize);
@@ -199,6 +333,14 @@ namespace loom {
 
     Canvas::NodeFrame::~NodeFrame() { ImGui::End(); }
     Canvas::NodeFrame::operator bool() const { return !ImGui::GetCurrentWindow()->SkipItems; }
+
+    Canvas::PopupScope::PopupScope(const char* name) : m_open(ImGui::BeginPopup(name)) {}
+    Canvas::PopupScope::~PopupScope() { if (m_open) ImGui::EndPopup(); }
+    Canvas::PopupScope::operator bool() const { return m_open; }
+
+    Canvas::MenuScope::MenuScope(const char* name) : m_open(ImGui::BeginMenu(name)) {}
+    Canvas::MenuScope::~MenuScope() { if (m_open) ImGui::EndMenu(); }
+    Canvas::MenuScope::operator bool() const { return m_open; }
 
     Canvas::Frame::Frame(ImGuiContext* context, ImVec2 pan, float scale)
         : initialPan(pan), initialScale(scale), m_host(ImGui::GetCurrentContext()), m_context(context) {
@@ -385,8 +527,8 @@ namespace loom {
         // Moving the owning pointers never moves the node objects themselves.
         const auto count = m_nodes.size();
         for (std::size_t i = 0; i < count; ++i) {
-            Node& node = *m_nodes[i];
-            if (NodeFrame nodeFrame(node, style, frame.root->Pos); nodeFrame) node.draw();
+            Node& node = *m_nodes[i].node;
+            if (NodeFrame nodeFrame(m_nodes[i], style, frame.root->Pos); nodeFrame) node.draw();
         }
     }
 
@@ -395,12 +537,14 @@ namespace loom {
         ImGuiIO& io = context.IO;
         const ImGuiID selection = frame.root->GetID("##selection");
         if (!frame.focused || context.ActiveId != selection) {
-            m_gesture = std::monostate{};
+            finishGesture();
             return;
         }
         const bool dragging = ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left);
         if (auto* drag = std::get_if<NodeDrag>(&m_gesture)) {
             if (dragging && std::ranges::contains(m_selection, drag->pressed)) {
+                if (drag->initial.empty())
+                    for (Node* node : m_selection) drag->initial.push_back({.node = node, .position = node->position});
                 const ImVec2 distance = io.MousePos - drag->origin;
                 for (Node* node : m_selection) node->position += distance - drag->applied;
                 drag->applied = distance;
@@ -412,8 +556,9 @@ namespace loom {
             const ImVec2 mouse = io.MousePos - frame.root->Pos;
             const ImRect bounds(ImMin(box->origin, mouse), ImMax(box->origin, mouse));
             m_selection = box->initial;
-            for (const auto& node : m_nodes) {
-                const ImGuiWindow* window = nodeWindow(*node);
+            for (const auto& item : m_nodes) {
+                const auto& node = item.node;
+                const ImGuiWindow* window = nodeWindow(item);
                 if (!window) continue;
                 if (!bounds.Overlaps(ImRect(node->position, node->position + window->Size))) continue;
                 if (box->toggle && std::ranges::contains(box->initial, node.get())) std::erase(m_selection, node.get());
@@ -421,9 +566,23 @@ namespace loom {
             }
         }
         if (!io.MouseDown[ImGuiMouseButton_Left]) {
-            m_gesture = std::monostate{};
-            ImGui::ClearActiveID();
+            finishGesture();
         }
+    }
+
+    void Canvas::finishGesture() {
+        if (auto* drag = std::get_if<NodeDrag>(&m_gesture); drag && std::ranges::any_of(drag->initial,
+                [](const Placement& item) { return item.node->position != item.position; }))
+            record(Move{.positions = std::move(drag->initial)});
+        if (!std::holds_alternative<std::monostate>(m_gesture)) ImGui::ClearActiveID();
+        m_gesture = std::monostate{};
+    }
+
+    Node* Canvas::hoveredNode() const {
+        if (ImGuiWindow* window = m_context->HoveredWindow)
+            for (const NodeEntry& item : m_nodes)
+                if (nodeWindow(item) == window->RootWindow) return item.node.get();
+        return nullptr;
     }
 
     void Canvas::select(const Frame& frame) {
@@ -431,10 +590,9 @@ namespace loom {
         const ImGuiIO& io = context.IO;
         if (!frame.hovered || !ImGui::IsMouseClicked(ImGuiMouseButton_Left)) return;
         if (!std::holds_alternative<std::monostate>(m_gesture)) return;
-        for (const auto& node : m_nodes) {
-            ImGuiWindow* window = nodeWindow(*node);
-            if (!window || !context.HoveredWindow || context.HoveredWindow->RootWindow != window) continue;
-            const bool selected = std::ranges::contains(m_selection, node.get());
+        if (Node* node = hoveredNode()) {
+            ImGuiWindow* window = context.HoveredWindow->RootWindow;
+            const bool selected = std::ranges::contains(m_selection, node);
             const bool popup = !context.OpenPopupStack.empty();
             const bool widget = popup || (context.HoveredId != 0 && context.HoveredId != window->MoveId)
                 || (context.ActiveId != 0 && context.ActiveId != window->MoveId);
@@ -442,14 +600,14 @@ namespace loom {
             // keyboard focus back from the popup or starting a canvas gesture.
             if (!popup) ImGui::FocusWindow(window);
             if (widget) {
-                if (!selected) m_selection = {node.get()};
+                if (!selected) m_selection = {node};
                 return;
             }
             if (io.KeyCtrl) {
-                if (selected) std::erase(m_selection, node.get());
-                else m_selection.push_back(node.get());
-            } else if (!selected) m_selection = {node.get()};
-            m_gesture = NodeDrag{.pressed = node.get(), .origin = io.MousePos, .applied = {0, 0}, .toggle = io.KeyCtrl};
+                if (selected) std::erase(m_selection, node);
+                else m_selection.push_back(node);
+            } else if (!selected) m_selection = {node};
+            m_gesture = NodeDrag{.pressed = node, .origin = io.MousePos, .applied = {0, 0}, .toggle = io.KeyCtrl};
             ImGui::SetActiveID(frame.root->GetID("##selection"), frame.root);
             context.ActiveIdMouseButton = ImGuiMouseButton_Left;
             return;
@@ -467,7 +625,7 @@ namespace loom {
     void Canvas::drawSelection(const Frame& frame) const {
         const ImGuiStyle& theme = ImGui::GetStyle();
         for (const Node* node : m_selection) {
-            ImGuiWindow* window = nodeWindow(*node);
+            ImGuiWindow* window = nodeWindow(entry(*node));
             if (!window || window->Hidden) continue;
             const ImVec4 color = resolve(node->style, style, &NodeStyle::selectionBorder, theme.Colors[ImGuiCol_NavCursor]);
             const float width = resolve(node->style, style, &NodeStyle::selectionBorderWidth, 2.0f);
@@ -482,6 +640,261 @@ namespace loom {
             list->AddRectFilled(ImMin(start, end), ImMax(start, end), ImGui::GetColorU32(ImGuiCol_Header, 0.25f));
             list->AddRect(ImMin(start, end), ImMax(start, end), ImGui::GetColorU32(ImGuiCol_NavCursor));
         }
+    }
+
+    void Canvas::drawContextMenu(const Frame& frame) {
+        ImGuiContext& context = *m_context;
+        const ImGuiIO& io = context.IO;
+        if (frame.hovered && frame.focused && ImGui::IsMouseReleased(ImGuiMouseButton_Right)
+                && !io.MouseDown[ImGuiMouseButton_Left] && !io.MouseDown[ImGuiMouseButton_Middle]
+                && context.OpenPopupStack.empty() && std::holds_alternative<std::monostate>(m_gesture)) {
+            Node* target = hoveredNode();
+            const bool background = context.HoveredWindow == frame.root || context.HoveredWindow == nullptr;
+            if ((target || background) && (context.ActiveId == 0 || context.ActiveId == context.InputTextState.ID)) {
+                finishStyleEdit();
+                m_menu = ContextMenu{.node = target, .position = io.MousePos - frame.root->Pos};
+                if (target) {
+                    if (!std::ranges::contains(m_selection, target)) m_selection = {target};
+                    ImGui::FocusWindow(context.HoveredWindow->RootWindow);
+                }
+                ImGui::OpenPopup("##context");
+            }
+        }
+        if (const PopupScope popup("##context"); popup) {
+            if (m_menu->node) drawNodeMenu(*m_menu->node);
+            else drawCanvasMenu();
+        }
+        if (!ImGui::IsPopupOpen("##context")) {
+            finishStyleEdit();
+            m_menu.reset();
+        } else if (!frame.focused || context.ActiveId == 0) finishStyleEdit();
+    }
+
+    void Canvas::drawCanvasMenu() {
+        if (addMenu) {
+            if (const MenuScope menu("Add"); menu) {
+                const auto first = m_nodes.size();
+                try {
+                    addMenu(*this, m_menu->position);
+                } catch (...) {
+                    // Successful additions remain owned and undoable even if the
+                    // application's balanced menu callback subsequently throws.
+                    recordCreation(first);
+                    throw;
+                }
+                recordCreation(first);
+            }
+            ImGui::Separator();
+        }
+        if (ImGui::MenuItem("Undo", "Ctrl+Z", false, !m_undo.empty())) replay(m_undo, m_redo, true);
+        if (ImGui::MenuItem("Redo", "Ctrl+Y", false, !m_redo.empty())) replay(m_redo, m_undo, false);
+        ImGui::Separator();
+        ImGui::TextDisabled("Zoom: %.0f%%", m_scale * 100);
+        if (ImGui::MenuItem("Reset zoom", nullptr, false, m_scale != 1)) {
+            m_pan = ImGui::GetMousePosOnOpeningCurrentPopup() * m_scale - m_menu->position;
+            m_scale = 1;
+        }
+    }
+
+    void Canvas::drawNodeMenu(Node& node) {
+        if (const MenuScope menu("Rename"); menu) {
+            if (ImGui::IsWindowAppearing()) {
+                m_menu->title.assign(node.title.begin(), node.title.end());
+                m_menu->title.push_back('\0');
+                ImGui::SetKeyboardFocusHere();
+            }
+            const bool enter = inputTitle(m_menu->title);
+            if (ImGui::Button("Apply") || enter) {
+                std::string title(m_menu->title.data());
+                if (title != node.title) {
+                    Rename change{.node = &node, .title = std::move(node.title)};
+                    node.title = std::move(title);
+                    record(std::move(change));
+                }
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        if (const MenuScope menu("Style"); menu) drawStyleMenu(node);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Delete", "Delete")) deleteSelection();
+    }
+
+    void Canvas::drawStyleMenu(Node& node) {
+        const ImGuiStyle& theme = ImGui::GetStyle();
+        styleProperty(node, "Header",           &NodeStyle::header,               theme.Colors[ImGuiCol_TitleBg]);
+        styleProperty(node, "Header text",      &NodeStyle::headerText,           theme.Colors[ImGuiCol_Text]);
+        styleProperty(node, "Body",             &NodeStyle::body,                 theme.Colors[ImGuiCol_WindowBg]);
+        styleProperty(node, "Border",           &NodeStyle::border,               theme.Colors[ImGuiCol_Border]);
+        styleProperty(node, "Selection border", &NodeStyle::selectionBorder,      theme.Colors[ImGuiCol_NavCursor]);
+        ImGui::Separator();
+        styleProperty(node, "Padding",          &NodeStyle::padding,              theme.WindowPadding);
+        styleProperty(node, "Rounding",         &NodeStyle::rounding,             theme.WindowRounding);
+        styleProperty(node, "Border width",     &NodeStyle::borderWidth,          theme.WindowBorderSize);
+        styleProperty(node, "Selection width",  &NodeStyle::selectionBorderWidth, 2.0f);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Reset style")) {
+            finishStyleEdit();
+            beginStyleEdit();
+            for (Node* selected : m_selection) selected->style = {};
+            finishStyleEdit();
+        }
+    }
+
+    void Canvas::styleProperty(Node& node, const char* label, auto member, auto fallback) {
+        ImGui::PushID(label);
+        // Display the clicked node's value; edits apply to the selected group.
+        auto value = resolve(node.style, style, member, fallback);
+        ImGui::SetNextItemWidth(170);
+        bool changed;
+        if constexpr (std::same_as<decltype(value), ImVec4>)
+            changed = ImGui::ColorEdit4(label, &value.x, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+        else if constexpr (std::same_as<decltype(value), ImVec2>)
+            changed = ImGui::DragFloat2(label, &value.x, 0.1f, 0, FLT_MAX, "%.1f", ImGuiSliderFlags_AlwaysClamp);
+        else
+            changed = ImGui::DragFloat(label, &value, 0.1f, 0, FLT_MAX, "%.1f", ImGuiSliderFlags_AlwaysClamp);
+        if (changed) {
+            beginStyleEdit();
+            for (Node* selected : m_selection) selected->style.*member = value;
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) finishStyleEdit();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!std::ranges::any_of(m_selection,
+            [&](const Node* selected) { return (selected->style.*member).has_value(); }));
+        if (ImGui::SmallButton("Inherit")) {
+            finishStyleEdit();
+            beginStyleEdit();
+            for (Node* selected : m_selection) (selected->style.*member).reset();
+            finishStyleEdit();
+        }
+        ImGui::EndDisabled();
+        ImGui::PopID();
+    }
+
+    void Canvas::beginStyleEdit() {
+        if (m_styleEdit) return;
+        m_styleEdit.emplace();
+        for (Node* selected : m_selection)
+            m_styleEdit->appearances.push_back({.node = selected, .style = selected->style});
+    }
+
+    void Canvas::finishStyleEdit() {
+        if (!m_styleEdit) return;
+        if (std::ranges::any_of(m_styleEdit->appearances,
+                [](const Appearance& item) { return !sameStyle(item.style, item.node->style); }))
+            record(std::move(*m_styleEdit));
+        m_styleEdit.reset();
+    }
+
+    void Canvas::shortcuts(const Frame& frame) {
+        const ImGuiIO& io = ImGui::GetIO();
+        if (!frame.focused || io.WantTextInput || m_context->ActiveId != 0 || !m_context->OpenPopupStack.empty()) return;
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
+            if (io.KeyShift) replay(m_redo, m_undo, false);
+            else replay(m_undo, m_redo, true);
+        } else if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y, false)) replay(m_redo, m_undo, false);
+        else if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) deleteSelection();
+    }
+
+    void Canvas::recordCreation(std::size_t first) {
+        if (first == m_nodes.size()) return;
+        Nodes change{.beforeSelection = m_selection};
+        for (std::size_t i = first; i < m_nodes.size(); ++i) {
+            change.nodes.push_back({.index = i, .node = m_nodes[i].node.get()});
+            change.afterSelection.push_back(m_nodes[i].node.get());
+        }
+        m_selection = change.afterSelection;
+        record(std::move(change));
+    }
+
+    void Canvas::deleteSelection() {
+        if (m_selection.empty()) return;
+        finishGesture();
+        finishStyleEdit();
+        Nodes change{.beforeSelection = m_selection};
+        for (std::size_t i = 0; i < m_nodes.size(); ++i)
+            if (std::ranges::contains(m_selection, m_nodes[i].node.get()))
+                change.nodes.push_back({.index = i, .node = m_nodes[i].node.get()});
+        transfer(change);
+        m_selection = change.afterSelection;
+        record(std::move(change));
+    }
+
+    void Canvas::record(Action action) {
+        m_redo = {};
+        m_undo.push(std::move(action));
+    }
+
+    void Canvas::replay(History& source, History& destination, bool undo) {
+        finishGesture();
+        finishStyleEdit();
+        if (source.empty()) return;
+        std::visit([&](auto& change) {
+            using T = std::remove_cvref_t<decltype(change)>;
+            if constexpr (std::same_as<T, Nodes>) {
+                transfer(change);
+                m_selection = undo ? change.beforeSelection : change.afterSelection;
+            } else if constexpr (std::same_as<T, Move>) {
+                for (Placement& item : change.positions) std::swap(item.node->position, item.position);
+            } else if constexpr (std::same_as<T, Rename>) std::swap(change.node->title, change.title);
+            else for (Appearance& item : change.appearances) std::swap(item.node->style, item.style);
+        }, source.top());
+        destination.push(std::move(source.top()));
+        source.pop();
+    }
+
+    void Canvas::transfer(Nodes& change) {
+        if (std::holds_alternative<Node*>(change.nodes.front().node)) {
+            // Remove back-to-front and restore front-to-back to preserve order.
+            for (auto it = change.nodes.rbegin(); it != change.nodes.rend(); ++it) {
+                Node* node = std::get<Node*>(it->node);
+                auto found = std::ranges::find_if(m_nodes, [&](const NodeEntry& item) { return item.node.get() == node; });
+                IM_ASSERT(found != m_nodes.end());
+                it->index = static_cast<std::size_t>(found - m_nodes.begin());
+                detach(*found);
+                it->node = std::move(*found);
+                m_nodes.erase(found);
+            }
+        } else {
+            for (NodeTransfer& item : change.nodes) {
+                NodeEntry& owned = std::get<NodeEntry>(item.node);
+                Node* node = owned.node.get();
+                m_nodes.insert(m_nodes.begin() + static_cast<std::ptrdiff_t>(item.index), std::move(owned));
+                item.node = node;
+            }
+        }
+    }
+
+    void Canvas::detach(const NodeEntry& entry) {
+        Node* node = entry.node.get();
+        std::erase(m_selection, node);
+        ImGuiWindow* window = nodeWindow(entry);
+        auto belongs = [window](ImGuiWindow* candidate) {
+            if (!window) return false;
+            for (; candidate; candidate = candidate->ParentWindowInBeginStack)
+                if (candidate == window) return true;
+            return false;
+        };
+        if (belongs(m_context->ActiveIdWindow)) ImGui::ClearActiveID();
+        if (belongs(m_context->NavWindow)) ImGui::FocusWindow(nullptr);
+        if (belongs(m_context->HoveredWindow)) m_context->HoveredWindow = nullptr;
+        if (belongs(m_context->HoveredWindowUnderMovingWindow)) m_context->HoveredWindowUnderMovingWindow = nullptr;
+        if (m_menu && m_menu->node == node) {
+            ImGui::ClosePopupsOverWindow(nullptr, false);
+            m_menu.reset();
+        } else if (std::ranges::any_of(m_context->OpenPopupStack, [&](const ImGuiPopupData& popup) { return belongs(popup.Window); }))
+            ImGui::ClosePopupsOverWindow(nullptr, false);
+        for (ImGuiWindow* child : m_context->Windows) {
+            if (!belongs(child)) continue;
+            child->Active = child->WasActive = false;
+            child->Hidden = true;
+            child->OuterRectClipped = ImRect(0, 0, 0, 0);
+        }
+    }
+
+    const Canvas::NodeEntry& Canvas::entry(const Node& node) const {
+        auto found = std::ranges::find_if(m_nodes, [&](const NodeEntry& item) { return item.node.get() == &node; });
+        IM_ASSERT(found != m_nodes.end());
+        return *found;
     }
 
     void Canvas::navigate(const Frame& frame) {
@@ -508,9 +921,9 @@ namespace loom {
     void Canvas::positionNodes() {
         const ContextScope context(m_context);
         const ImVec2 origin = ImTrunc(m_pan / m_scale);
-        for (const auto& node : m_nodes)
-            if (ImGuiWindow* window = nodeWindow(*node))
-                moveWindow(window, ImTrunc(origin + node->position));
+        for (const auto& item : m_nodes)
+            if (ImGuiWindow* window = nodeWindow(item))
+                moveWindow(window, ImTrunc(origin + item.node->position));
     }
 
     void Canvas::positionPopups(const Frame& frame) {
@@ -560,11 +973,27 @@ namespace loom {
         list.PopClipRect();
     }
 
-    ImGuiWindow* Canvas::nodeWindow(const Node& node) {
+    ImGuiWindow* Canvas::nodeWindow(const NodeEntry& entry) {
         // Lookup needs only the stable suffix, without allocating or copying the title.
-        char name[16 + sizeof(void*) * 2];
-        const auto end = std::format_to(name, "###loom-{}", static_cast<const void*>(&node));
+        char name[32];
+        const auto end = std::format_to(name, "###loom-{}", entry.serial);
         return ImGui::FindWindowByID(ImHashStr(name, static_cast<std::size_t>(end - name)));
+    }
+
+    bool Canvas::sameStyle(const NodeStyle& a, const NodeStyle& b) {
+        return a.header == b.header && a.headerText == b.headerText && a.body == b.body && a.border == b.border
+            && a.selectionBorder == b.selectionBorder && a.padding == b.padding && a.rounding == b.rounding
+            && a.borderWidth == b.borderWidth && a.selectionBorderWidth == b.selectionBorderWidth;
+    }
+
+    bool Canvas::inputTitle(std::vector<char>& title) {
+        return ImGui::InputText("Title", title.data(), title.size(), ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackResize,
+            [](ImGuiInputTextCallbackData* data) {
+                auto& buffer = *static_cast<std::vector<char>*>(data->UserData);
+                buffer.resize(static_cast<std::size_t>(data->BufSize));
+                data->Buf = buffer.data();
+                return 0;
+            }, &title);
     }
 
     auto Canvas::resolve(const NodeStyle& node, const NodeStyle& canvas, auto member, auto fallback) -> decltype(fallback) {
