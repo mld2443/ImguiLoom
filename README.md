@@ -40,26 +40,31 @@ the standard-library module.
 #include <imgui.h>
 import loom;
 
+struct Number : loom::Node {
+    explicit Number(float value) : Node("Number"), value(value) {}
+    void draw() override {
+        ImGui::SetNextItemWidth(160);
+        ImGui::DragFloat("Value", &value);
+    }
+    float value;
+};
+
 // After creating the application's ImGui context:
 loom::Canvas canvas;
-char name[128] = "Loom";
+canvas.add<Number>({40, 40}, 1.0f);
 
 // Each frame, inside an ImGui window:
-canvas.draw([&] {
-    ImGui::InputText("Name", name, sizeof(name));
-});
+canvas.draw();
 ```
 
-The canvas fills the remaining content region. Its callback runs immediately in
-a separate context sharing the host's font atlas; widget dimensions are canvas
-units. The callback must balance its own ImGui operations. Destroy the canvas
-before the host context. Canvases cannot be copied or moved.
+The canvas owns its nodes and fills the remaining content region. Node `draw()`
+methods run in a separate context sharing the host's font atlas; widget dimensions
+are canvas units. Each node must balance its own ImGui operations. Destroy the
+canvas before the host context. Canvases cannot be copied or moved.
 
 Wheel over the background to zoom around the pointer; middle-drag the background
 to pan, including while a popup or modal is open. Widgets retain scrolling and
 mouse gestures. Popups follow their canvas anchors and scale with the view;
 placement remains bounded by the canvas. The grid has fixed spacing in canvas units.
 
-This first implementation provides the canvas and widget integration. Nodes,
-connections, selection, nested canvases, and cross-context drag-and-drop remain
-future work.
+Connections, nested canvases, and cross-context drag-and-drop remain future work.
