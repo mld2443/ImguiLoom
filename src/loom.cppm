@@ -211,8 +211,8 @@ export namespace loom {
         ImVec2              m_pan = {0, 0};
         float               m_scale = 1;
         std::uint64_t       m_nextSerial = 1;
-        std::vector<NodeEntry>             m_nodes;
-        std::vector<Node*>                 m_selection;
+        std::vector<NodeEntry> m_nodes;
+        std::vector<Node*>     m_selection;
         std::variant<std::monostate, NodeDrag, BoxSelection> m_gesture;
         std::optional<ContextMenu> m_menu;
         std::optional<Restyle>     m_styleEdit;
