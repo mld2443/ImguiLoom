@@ -9,13 +9,17 @@ module;
 #include <imgui_internal.h>
 
 module loom;
+import :context;
 
 namespace loom {
-    //////////////////
-    // MARK: Canvas //
-    //////////////////
+    ///////////////////
+    // MARK: Context //
+    ///////////////////
 
-    ImGuiContext* Canvas::createContext(ImGuiContext* host) {
+    Context::Context() : m_host(ImGui::GetCurrentContext()), m_context(createContext(m_host)) {}
+    Context::~Context() { ImGui::DestroyContext(m_context); }
+
+    ImGuiContext* Context::createContext(ImGuiContext* host) {
         IM_ASSERT(host != nullptr && "Construct Canvas after the host ImGui context");
         ImGuiContext* context = ImGui::CreateContext(host->IO.Fonts);
         const ContextScope scope(context);
@@ -36,20 +40,20 @@ namespace loom {
         return context;
     }
 
-    ////////////////////////////////
-    // MARK: Canvas::ContextScope //
-    ////////////////////////////////
+    /////////////////////////////////
+    // MARK: Context::ContextScope //
+    /////////////////////////////////
 
-    Canvas::ContextScope::ContextScope(ImGuiContext* context) : m_previous(ImGui::GetCurrentContext()) {
+    Context::ContextScope::ContextScope(ImGuiContext* context) : m_previous(ImGui::GetCurrentContext()) {
         ImGui::SetCurrentContext(context);
     }
-    Canvas::ContextScope::~ContextScope() { ImGui::SetCurrentContext(m_previous); }
+    Context::ContextScope::~ContextScope() { ImGui::SetCurrentContext(m_previous); }
 
-    /////////////////////////
-    // MARK: Canvas::Frame //
-    /////////////////////////
+    //////////////////////////
+    // MARK: Context::Frame //
+    //////////////////////////
 
-    Canvas::Frame::Frame(ImGuiContext* context, ImVec2 pan, float scale)
+    Context::Frame::Frame(ImGuiContext* context, ImVec2 pan, float scale)
         : initialPan(pan), initialScale(scale), m_host(ImGui::GetCurrentContext()), m_context(context) {
         ImGui::PushID(m_context);
         const bool visible = ImGui::BeginChild("##canvas", {0, 0}, ImGuiChildFlags_None,
@@ -86,7 +90,7 @@ namespace loom {
         io.ConfigFlags = m_host->IO.ConfigFlags & ImGuiConfigFlags_NavEnableKeyboard;
         io.MouseDragThreshold = m_host->IO.MouseDragThreshold / initialScale;
         ImGui::GetStyle() = m_host->Style;
-        // Canvas has positioned its windows; clip their hit bounds to this viewport
+        // Retained windows are already positioned; clip their hit bounds to this viewport
         // before NewFrame, including when the host region was resized.
         for (ImGuiWindow* window : m_context->Windows)
             window->OuterRectClipped.ClipWith(ImRect({0, 0}, io.DisplaySize));
@@ -106,7 +110,7 @@ namespace loom {
         root = ImGui::GetCurrentWindow();
     }
 
-    Canvas::Frame::~Frame() {
+    Context::Frame::~Frame() {
         ImGui::SetCurrentContext(m_context);
         // An interrupted draw still closes its ImGui scopes, without rendering it.
         if (root) ImGui::End();
@@ -116,9 +120,9 @@ namespace loom {
         ImGui::PopID();
     }
 
-    Canvas::Frame::operator bool() const { return root != nullptr; }
+    Context::Frame::operator bool() const { return root != nullptr; }
 
-    void Canvas::Frame::render(ImVec2 pan, float scale) {
+    void Context::Frame::render(ImVec2 pan, float scale) {
         forwardRequests(pan, scale);
         ImGui::End();
         root = nullptr;
@@ -132,7 +136,7 @@ namespace loom {
         for (const ImDrawList* list : data.CmdLists) append(*list, pan, scale);
     }
 
-    void Canvas::Frame::forwardInput() {
+    void Context::Frame::forwardInput() {
         ImGuiIO& io = ImGui::GetIO();
         io.AddFocusEvent(focused);
         bool dragging = false;
@@ -172,7 +176,7 @@ namespace loom {
         else io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
     }
 
-    void Canvas::Frame::forwardRequests(ImVec2 pan, float scale) {
+    void Context::Frame::forwardRequests(ImVec2 pan, float scale) {
         ImGuiContext& host = *m_host;
         ImGuiContext& inner = *m_context;
         if (hovered || inner.ActiveId != 0) host.IO.WantCaptureMouse |= inner.IO.WantCaptureMouse;
@@ -191,7 +195,7 @@ namespace loom {
         if (hovered || inner.ActiveId != 0) host.MouseCursor = inner.MouseCursor;
     }
 
-    void Canvas::Frame::append(const ImDrawList& source, ImVec2 pan, float scale) const {
+    void Context::Frame::append(const ImDrawList& source, ImVec2 pan, float scale) const {
         ImDrawList& target = *ImGui::GetWindowDrawList();
         const unsigned int vertex = static_cast<unsigned int>(target.VtxBuffer.Size);
         const unsigned int index = static_cast<unsigned int>(target.IdxBuffer.Size);

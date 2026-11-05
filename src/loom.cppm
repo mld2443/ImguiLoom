@@ -19,10 +19,11 @@ module;
 #include <imgui_internal.h>
 
 export module loom;
+export import :context;
 export import :node;
 
 export namespace loom {
-    class Canvas {
+    class Canvas : protected Context {
     public:
         Canvas();
         Canvas(const Canvas&) = delete;
@@ -81,16 +82,6 @@ export namespace loom {
         using History = std::stack<Action, std::vector<Action>>;
 
         // ImGui scopes.
-        class ContextScope {
-        public:
-            explicit ContextScope(ImGuiContext* context);
-            ContextScope(const ContextScope&) = delete;
-            ContextScope& operator=(const ContextScope&) = delete;
-            ~ContextScope();
-        private:
-            ImGuiContext* m_previous;
-        };
-
         class NodeFrame {
         public:
             NodeFrame(const NodeEntry& entry, const NodeStyle& style, ImVec2 origin);
@@ -120,33 +111,6 @@ export namespace loom {
             explicit operator bool() const;
         private:
             bool m_open;
-        };
-
-        class Frame {
-        public:
-            Frame(ImGuiContext* context, ImVec2 pan, float scale);
-            Frame(const Frame&) = delete;
-            Frame& operator=(const Frame&) = delete;
-            ~Frame();
-            explicit operator bool() const;
-            void render(ImVec2 pan, float scale);
-
-            ImGuiWindow* root = nullptr;
-            ImVec2       screenOrigin;
-            ImVec2       extent;
-            ImRect       clip;
-            const ImVec2 initialPan;
-            const float  initialScale;
-            bool         hovered = false;
-            bool         focused = false;
-
-        private:
-            void forwardInput();
-            void forwardRequests(ImVec2 pan, float scale);
-            void append(const ImDrawList& source, ImVec2 pan, float scale) const;
-
-            ImGuiContext* const m_host;
-            ImGuiContext* const m_context;
         };
 
         // Interaction. References here never own nodes.
@@ -204,10 +168,6 @@ export namespace loom {
             return (node.*member).value_or((canvas.*member).value_or(fallback));
         }
 
-        static ImGuiContext* createContext(ImGuiContext* host);
-
-        ImGuiContext* const m_host;
-        ImGuiContext* const m_context; // Owned: ImGui creates and destroys its heap-allocated context.
         ImVec2              m_pan = {0, 0};
         float               m_scale = 1;
         std::uint64_t       m_nextSerial = 1;

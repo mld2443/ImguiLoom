@@ -22,13 +22,8 @@ namespace loom {
     // MARK: Canvas //
     //////////////////
 
-    Canvas::Canvas() : m_host(ImGui::GetCurrentContext()), m_context(createContext(m_host)) {}
-    Canvas::~Canvas() {
-        m_redo = {};
-        m_undo = {};
-        m_nodes.clear();
-        ImGui::DestroyContext(m_context);
-    }
+    Canvas::Canvas() = default;
+    Canvas::~Canvas() = default;
 
     void Canvas::draw() {
         IM_ASSERT(ImGui::GetCurrentContext() == m_host);
