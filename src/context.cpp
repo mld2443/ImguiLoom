@@ -53,11 +53,13 @@ namespace loom {
     // MARK: Context::Frame //
     //////////////////////////
 
-    Context::Frame::Frame(ImGuiContext* context, ImVec2 pan, float scale)
+    Context::Frame::Frame(ImGuiContext* context, ImVec2 pan, float scale, ImVec4 background)
         : initialPan(pan), initialScale(scale), m_host(ImGui::GetCurrentContext()), m_context(context) {
         ImGui::PushID(m_context);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, background);
         const bool visible = ImGui::BeginChild("##canvas", {0, 0}, ImGuiChildFlags_None,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PopStyleColor();
         screenOrigin = ImGui::GetCursorScreenPos();
         extent = ImGui::GetContentRegionAvail();
         clip = ImGui::GetCurrentWindow()->ClipRect;

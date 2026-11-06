@@ -4,6 +4,7 @@ module;
 #include <imgui_internal.h>
 
 export module loom:context;
+import :style;
 
 namespace loom {
     class Context {
@@ -27,7 +28,7 @@ namespace loom {
 
         class Frame {
         public:
-            Frame(ImGuiContext* context, ImVec2 pan, float scale);
+            Frame(ImGuiContext* context, ImVec2 pan, float scale, ImVec4 background);
             Frame(const Frame&) = delete;
             Frame& operator=(const Frame&) = delete;
             ~Frame();
@@ -52,6 +53,7 @@ namespace loom {
             ImGuiContext* const m_context;
         };
 
+        StyleDefaults defaults;
         ImGuiContext* const m_host;
         ImGuiContext* const m_context; // Owned; derived state is destroyed before this context.
 

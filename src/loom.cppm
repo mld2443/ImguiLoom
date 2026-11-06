@@ -21,9 +21,10 @@ module;
 export module loom;
 export import :context;
 export import :node;
+export import :style;
 
 export namespace loom {
-    class Canvas : protected Context {
+    class Canvas : protected Context, public Stylish<CanvasStyle> {
     public:
         Canvas();
         Canvas(const Canvas&) = delete;
@@ -54,7 +55,7 @@ export namespace loom {
         // Nodes added here form one undoable UI action. Balance your own ImGui
         // operations; captured application data must outlive this callable's use.
         std::function<void(Canvas&, ImVec2)> addMenu;
-        NodeStyle style;
+        using Context::defaults;
 
     private:
         // Ownership and inverse edits.
@@ -76,15 +77,14 @@ export namespace loom {
         struct Placement { Node* node; ImVec2 position; };
         struct Move { std::vector<Placement> positions; };
         struct Rename { Node* node; std::string title; };
-        struct Appearance { Node* node; NodeStyle style; };
-        struct Restyle { std::vector<Appearance> appearances; };
+        using Restyle = NodeStyleEditor::Edit;
         using Action = std::variant<Nodes, Move, Rename, Restyle>;
         using History = std::stack<Action, std::vector<Action>>;
 
         // ImGui scopes.
         class NodeFrame {
         public:
-            NodeFrame(const NodeEntry& entry, const NodeStyle& style, ImVec2 origin);
+            NodeFrame(const NodeEntry& entry, const NodeStyle& defaults, ImVec2 origin);
             NodeFrame(const NodeFrame&) = delete;
             NodeFrame& operator=(const NodeFrame&) = delete;
             ~NodeFrame();
@@ -144,8 +144,6 @@ export namespace loom {
         void drawCanvasMenu();
         void drawNodeMenu(Node& node);
         void drawStyleMenu(Node& node);
-        void styleProperty(Node& node, const char* label, auto member, auto fallback);
-        void beginStyleEdit();
         void finishStyleEdit();
         void shortcuts(const Frame& frame);
         void recordCreation(std::size_t first);
@@ -162,11 +160,7 @@ export namespace loom {
         void drawGrid(const Frame& frame) const;
 
         static ImGuiWindow* nodeWindow(const NodeEntry& entry);
-        static bool sameStyle(const NodeStyle& a, const NodeStyle& b);
         static bool inputTitle(std::vector<char>& title);
-        static auto resolve(const NodeStyle& node, const NodeStyle& canvas, auto member, auto fallback) -> decltype(fallback) {
-            return (node.*member).value_or((canvas.*member).value_or(fallback));
-        }
 
         ImVec2              m_pan = {0, 0};
         float               m_scale = 1;
@@ -175,7 +169,7 @@ export namespace loom {
         std::vector<Node*>     m_selection;
         std::variant<std::monostate, NodeDrag, BoxSelection> m_gesture;
         std::optional<ContextMenu> m_menu;
-        std::optional<Restyle>     m_styleEdit;
+        NodeStyleEditor          m_styleEditor;
         History m_undo;
         History m_redo;
     };

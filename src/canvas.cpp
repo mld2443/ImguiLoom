@@ -29,7 +29,7 @@ namespace loom {
         IM_ASSERT(ImGui::GetCurrentContext() == m_host);
         // Align retained windows before ImGui performs this frame's hit testing.
         positionNodes();
-        Frame frame(m_context, m_pan, m_scale);
+        Frame frame(m_context, m_pan, m_scale, resolve(defaults.canvas).background);
         if (!frame) {
             finishGesture();
             finishStyleEdit();
@@ -57,7 +57,7 @@ namespace loom {
         const auto count = m_nodes.size();
         for (std::size_t i = 0; i < count; ++i) {
             Node& node = *m_nodes[i].node;
-            if (NodeFrame nodeFrame(m_nodes[i], style, frame.root->Pos); nodeFrame) node.draw();
+            if (NodeFrame nodeFrame(m_nodes[i], defaults.node, frame.root->Pos); nodeFrame) node.draw();
         }
     }
 
@@ -152,14 +152,12 @@ namespace loom {
     }
 
     void Canvas::drawSelection(const Frame& frame) const {
-        const ImGuiStyle& theme = ImGui::GetStyle();
         for (const Node* node : m_selection) {
             ImGuiWindow* window = nodeWindow(entry(*node));
             if (!window || window->Hidden) continue;
-            const ImVec4 color = resolve(node->style, style, &NodeStyle::selectionBorder, theme.Colors[ImGuiCol_NavCursor]);
-            const float width = resolve(node->style, style, &NodeStyle::selectionBorderWidth, 2.0f);
+            const auto appearance = node->resolve(defaults.node);
             window->DrawList->PushClipRectFullScreen();
-            window->DrawList->AddRect(window->Pos, window->Pos + window->Size, ImGui::GetColorU32(color), window->WindowRounding, width);
+            window->DrawList->AddRect(window->Pos, window->Pos + window->Size, ImGui::GetColorU32(appearance.selectionBorder), window->WindowRounding, appearance.selectionBorderWidth);
             window->DrawList->PopClipRect();
         }
         if (const auto* box = std::get_if<BoxSelection>(&m_gesture); box && ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left)) {
@@ -238,7 +236,7 @@ namespace loom {
         const ContextScope host(m_host);
         ImDrawList& list = *ImGui::GetWindowDrawList();
         const float spacing = 32 * m_scale;
-        const ImU32 color = ImGui::GetColorU32(ImGuiCol_Border, 0.45f);
+        const ImU32 color = ImGui::GetColorU32(resolve(defaults.canvas).grid);
         list.PushClipRect(frame.clip.Min, frame.clip.Max, true);
         for (float x = std::fmod(m_pan.x, spacing); x < frame.extent.x; x += spacing)
             list.AddLine({frame.screenOrigin.x + x, frame.screenOrigin.y}, {frame.screenOrigin.x + x, frame.screenOrigin.y + frame.extent.y}, color);
@@ -258,19 +256,18 @@ namespace loom {
     // MARK: Canvas::NodeFrame //
     /////////////////////////////
 
-    Canvas::NodeFrame::NodeFrame(const NodeEntry& entry, const NodeStyle& style, ImVec2 origin) {
+    Canvas::NodeFrame::NodeFrame(const NodeEntry& entry, const NodeStyle& defaults, ImVec2 origin) {
         const Node& node = *entry.node;
         const std::string name = std::format("{}###loom-{}", node.title, entry.serial);
-        const ImGuiStyle& theme = ImGui::GetStyle();
-        const ImVec4 header = resolve(node.style, style, &NodeStyle::header, theme.Colors[ImGuiCol_TitleBg]);
-        ImGui::PushStyleColor(ImGuiCol_TitleBg, header);
-        ImGui::PushStyleColor(ImGuiCol_TitleBgActive, header);
-        ImGui::PushStyleColor(ImGuiCol_Text, resolve(node.style, style, &NodeStyle::headerText, theme.Colors[ImGuiCol_Text]));
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, resolve(node.style, style, &NodeStyle::body, theme.Colors[ImGuiCol_WindowBg]));
-        ImGui::PushStyleColor(ImGuiCol_Border, resolve(node.style, style, &NodeStyle::border, theme.Colors[ImGuiCol_Border]));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, resolve(node.style, style, &NodeStyle::padding, theme.WindowPadding));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, resolve(node.style, style, &NodeStyle::rounding, theme.WindowRounding));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, resolve(node.style, style, &NodeStyle::borderWidth, theme.WindowBorderSize));
+        const auto appearance = node.resolve(defaults);
+        ImGui::PushStyleColor(ImGuiCol_TitleBg, appearance.header);
+        ImGui::PushStyleColor(ImGuiCol_TitleBgActive, appearance.header);
+        ImGui::PushStyleColor(ImGuiCol_Text, appearance.headerText);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, appearance.body);
+        ImGui::PushStyleColor(ImGuiCol_Border, appearance.border);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, appearance.padding);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, appearance.rounding);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, appearance.borderWidth);
         ImGui::SetNextWindowPos(origin + node.position);
         // Native auto-fit clamps to the viewport. A node's logical dimensions must
         // instead follow its content, even when zoom makes it larger than the view.

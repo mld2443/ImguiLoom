@@ -130,69 +130,13 @@ namespace loom {
     }
 
     void Canvas::drawStyleMenu(Node& node) {
-        const ImGuiStyle& theme = ImGui::GetStyle();
-        styleProperty(node, "Header",           &NodeStyle::header,               theme.Colors[ImGuiCol_TitleBg]);
-        styleProperty(node, "Header text",      &NodeStyle::headerText,           theme.Colors[ImGuiCol_Text]);
-        styleProperty(node, "Body",             &NodeStyle::body,                 theme.Colors[ImGuiCol_WindowBg]);
-        styleProperty(node, "Border",           &NodeStyle::border,               theme.Colors[ImGuiCol_Border]);
-        styleProperty(node, "Selection border", &NodeStyle::selectionBorder,      theme.Colors[ImGuiCol_NavCursor]);
-        ImGui::Separator();
-        styleProperty(node, "Padding",          &NodeStyle::padding,              theme.WindowPadding);
-        styleProperty(node, "Rounding",         &NodeStyle::rounding,             theme.WindowRounding);
-        styleProperty(node, "Border width",     &NodeStyle::borderWidth,          theme.WindowBorderSize);
-        styleProperty(node, "Selection width",  &NodeStyle::selectionBorderWidth, 2.0f);
-        ImGui::Separator();
-        if (ImGui::MenuItem("Reset style")) {
-            finishStyleEdit();
-            beginStyleEdit();
-            for (Node* selected : m_selection) selected->style = {};
-            finishStyleEdit();
-        }
-    }
-
-    void Canvas::styleProperty(Node& node, const char* label, auto member, auto fallback) {
-        ImGui::PushID(label);
-        // Display the clicked node's value; edits apply to the selected group.
-        auto value = resolve(node.style, style, member, fallback);
-        ImGui::SetNextItemWidth(170);
-        bool changed;
-        if constexpr (std::same_as<decltype(value), ImVec4>)
-            changed = ImGui::ColorEdit4(label, &value.x, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
-        else if constexpr (std::same_as<decltype(value), ImVec2>)
-            changed = ImGui::DragFloat2(label, &value.x, 0.1f, 0, FLT_MAX, "%.1f", ImGuiSliderFlags_AlwaysClamp);
-        else
-            changed = ImGui::DragFloat(label, &value, 0.1f, 0, FLT_MAX, "%.1f", ImGuiSliderFlags_AlwaysClamp);
-        if (changed) {
-            beginStyleEdit();
-            for (Node* selected : m_selection) selected->style.*member = value;
-        }
-        if (ImGui::IsItemDeactivatedAfterEdit()) finishStyleEdit();
-        ImGui::SameLine();
-        ImGui::BeginDisabled(!std::ranges::any_of(m_selection,
-            [&](const Node* selected) { return (selected->style.*member).has_value(); }));
-        if (ImGui::SmallButton("Inherit")) {
-            finishStyleEdit();
-            beginStyleEdit();
-            for (Node* selected : m_selection) (selected->style.*member).reset();
-            finishStyleEdit();
-        }
-        ImGui::EndDisabled();
-        ImGui::PopID();
-    }
-
-    void Canvas::beginStyleEdit() {
-        if (m_styleEdit) return;
-        m_styleEdit.emplace();
-        for (Node* selected : m_selection)
-            m_styleEdit->appearances.push_back({.node = selected, .style = selected->style});
+        std::vector<NodeStyle*> targets;
+        for (Node* selected : m_selection) targets.push_back(&selected->style);
+        for (auto& edit : m_styleEditor.draw(node.style, targets, defaults.node)) record(std::move(edit));
     }
 
     void Canvas::finishStyleEdit() {
-        if (!m_styleEdit) return;
-        if (std::ranges::any_of(m_styleEdit->appearances,
-                [](const Appearance& item) { return !sameStyle(item.style, item.node->style); }))
-            record(std::move(*m_styleEdit));
-        m_styleEdit.reset();
+        if (auto edit = m_styleEditor.finish()) record(std::move(*edit));
     }
 
     void Canvas::shortcuts(const Frame& frame) {
@@ -246,7 +190,7 @@ namespace loom {
             } else if constexpr (std::same_as<T, Move>) {
                 for (Placement& item : change.positions) std::swap(item.node->position, item.position);
             } else if constexpr (std::same_as<T, Rename>) std::swap(change.node->title, change.title);
-            else for (Appearance& item : change.appearances) std::swap(item.node->style, item.style);
+            else change.replay();
         }, source.top());
         destination.push(std::move(source.top()));
         source.pop();
@@ -305,12 +249,6 @@ namespace loom {
         auto found = std::ranges::find_if(m_nodes, [&](const NodeEntry& item) { return item.node.get() == &node; });
         IM_ASSERT(found != m_nodes.end());
         return *found;
-    }
-
-    bool Canvas::sameStyle(const NodeStyle& a, const NodeStyle& b) {
-        return a.header == b.header && a.headerText == b.headerText && a.body == b.body && a.border == b.border
-            && a.selectionBorder == b.selectionBorder && a.padding == b.padding && a.rounding == b.rounding
-            && a.borderWidth == b.borderWidth && a.selectionBorderWidth == b.selectionBorderWidth;
     }
 
     bool Canvas::inputTitle(std::vector<char>& title) {
